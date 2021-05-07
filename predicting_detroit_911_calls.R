@@ -30,12 +30,12 @@ glimpse(cad_ago_lat_month)
 poverty_ratios_2013 <- read_csv("~/911_calls/Income_to_Poverty_Ratios_in_Michigan_by_Zip_Code_Tabulation_Area,_2013.csv")
 povratio <- poverty_ratios_2013[,c(3,14)] 
 
-#subset to only include non-officer initated calls with non-missing response times
+#subset to only include non-officer initiated calls with non-missing response times
 data <- subset(cad_ago_lat_month, cad_ago_lat_month$officerinitiated=="No" & 
                cad_ago_lat_month$priority<=2 & !is.na(cad_ago_lat_month$totalresponsetime) &  
                  !is.na(cad_ago_lat_month$zip_code) & cad_ago_lat_month$zip_code!=0)
 
-#merge in poverty data by zipcode
+#merge in poverty data by zip code
 data <- merge(data, povratio, by.x = "zip_code", by.y = "ZCTA5CE10", all.x = TRUE)
 which(is.na(data$Pct_U100))
 data <- data[-(13143),] #removing next 60 rows
@@ -216,5 +216,4 @@ rf2 <- train(as.factor(datatrain$respond_atorbelowavg) ~ .,
                    tuneLength  = 15, 
                    trControl = control)
 print(rf_random)
-
 

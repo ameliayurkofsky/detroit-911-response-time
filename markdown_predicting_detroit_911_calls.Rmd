@@ -1,0 +1,244 @@
+---
+title: "Predicting Fast Response Time forDetroit 911 Calls for Service"
+author: "Amelia Yurkofsky"
+date: "3/28/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = TRUE)
+library(knitr)
+options(readr.num_columns = 0)
+```
+
+## Abstract
+
+This report investigates Detroit Police Department response times to emergency response  calls. In 2019, the Detroit Police Department fell under scrutiny for allegedly responding faster to Priority 1 and Priority 2  emergency response calls (i.e., 911-calls) from more affluent areas of the city (Hunter, 2019; LeDuff 2019). In 2019 the Detroit Police Commissioner reported that the average response for Priority 1 calls was about 13 minutes and the average response time for Priority 2 was 33 minutes. (Hunter, 2019). This report uses publicly available data including from the City of Detroit’s ‘Detroit’s Open Data Portal’ as well as ‘Data Driven Detroit’ (see Bibliography for links), containing information about 911 calls placed in the City of Detroit since September 20, 2016, including response time. The primary dataset used in this report is the “911 Calls For Service” dataset available from Detroit's Open Data Portal. This dataset includes response times (including intake time, dispatch time, travel time, etc.,), call descriptions (including call codes and descriptions), priority level, and information about the location of the call (including address, district number, precinct number, block ID, zip code, neighborhood, latitude and longitude) and call time stamp, as well as incident ID, agency, and responding unit. 
+
+```{r cars}
+suppressPackageStartupMessages(library(readr))
+suppressPackageStartupMessages(library(dplyr))
+#Import data set from the City of Detroit's Open Data Portal and take a quick peak at the variable types structure
+download.file("https://www.arcgis.com/sharing/rest/content/items/db5bd090a156471ea0acf65bff327fd1/data", "cad_ago_lat_month.csv")
+cad_ago_lat_month <- read_csv("cad_ago_lat_month.csv")
+glimpse(cad_ago_lat_month)
+poverty_ratios_2013 <- read_csv("~/911_calls/Income_to_Poverty_Ratios_in_Michigan_by_Zip_Code_Tabulation_Area,_2013.csv")
+povratio <- poverty_ratios_2013[,c(3,14)] 
+```
+
+
+## Preprocessing
+
+In pre-processing, we removed variables that could not provide any predictive power to our model including “incident ID” (all unique values), “officer-initiated” (we’re only interested in non-officer initiated, i.e., ‘emergency response’ calls), and “agency” (all values were ‘Detroit Police Department’). We also removed variables not related to the problem statement, for example time-related variables that occur after the call has been responded to (e.g., “time on scene”). For simplicity, we narrowed the list of redundant location-related variables to only “zip code” and “precinct number”, and we included only one response-time-related outcome variable (“total response time”) and eliminated the others (“intake time”, “dispatch time”, and “travel time”) for which “total response time” was a linear combination. Because information about neighborhood poverty and income levels was not available in the this “911 Calls For Service” dataset, data on the percent of families living at or below 100% of the federal poverty line was pulled from Data Driven Detroit and merged into the dataset. The three (at the time of this analysis) of observations with missing poverty rate statistics were inputted with the mean percent poverty rate. This resulted in a dataset of almost 14,000 observations (at the time of this analysis) of 10 variables. Because ‘Data Driven Detroit’ continually updates this data, these number may not reflect the current dataset. 
+
+```{r}
+#subset to only include non-officer initiated calls with non-missing response times
+data <- subset(cad_ago_lat_month, cad_ago_lat_month$officerinitiated=="No" & 
+               cad_ago_lat_month$priority<=2 & !is.na(cad_ago_lat_month$totalresponsetime) &  
+                 !is.na(cad_ago_lat_month$zip_code) & cad_ago_lat_month$zip_code!=0)
+
+#merge in poverty data by zip code
+data <- merge(data, povratio, by.x = "zip_code", by.y = "ZCTA5CE10", all.x = TRUE)
+data$Pct_U100[is.na(data$Pct_U100)] <- mean(data$Pct_U100, na.rm = TRUE) #replacing missing data with the mean
+
+#create time of day variable
+data$call_hour <- as.numeric(substr(data$call_timestamp, 12, 13))
+
+data$call_timeofday <- ifelse(data$call_hour>5 & data$call_hour<12, "Morning", 
+                            ifelse(data$call_hour>11 & data$call_hour<17 , "Afternoon", 
+                                   ifelse(data$call_hour>=17 & data$call_hour<=21, "Evening", "Night")))
+table(data$call_hour, data$call_timeofday, useNA = "always")
+
+
+#create new outcome variable
+data$respond_atorbelowavg <- ifelse((data$totalresponsetime<=13 & data$priority==1) |
+                                  (data$totalresponsetime<=33 & data$priority==2), "Y", "N")
+table(data$respond_atorbelowavg , useNA = "always")
+
+#list of variables to drop
+vars_remove <- names(data) %in% c("agency", "incident_id", "longitude", "latitude", "time_on_scene", 
+                                  "incident_address", "block_id", "respondingunit",  
+                                  "intaketime", "dispatchtime", "traveltime", "totaltime", 
+                                  "officerinitiated", "precinct_sca",   "neighborhood", "council_district")
+
+#drop unneeded variables
+data <- data[!vars_remove]
+
+dim(data)
+```
+
+
+## Exploratory Data Analysis
+
+The plot and Table 1 below shows that, as expected, Priority 1 calls have faster response times, at the time of this analysis on average 13.09 minutes, than Priority 2, at the time of this analysis on average 32.42 minutes. 
+
+```{r, echo=FALSE, results='asis'}
+##Exploratory Data Analysis
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(gridExtra))
+
+table1 <- data %>%
+  group_by(priority) %>%
+  summarise(A_mean = mean(totalresponsetime))
+kable(table1, caption = "Table 1")
+
+#priority
+ggplot(data = data, aes(x=as.factor(priority), y=totalresponsetime,
+                        color=as.factor(priority))) +
+  geom_boxplot() +
+  xlab('Priority') +
+  ylab('Response Time') +
+  ggtitle('Priority vs Response TIme')  + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+```
+
+Table 2 below shows that the most common Priority 1 calls were for Domestic Violence Assault and Battery Injured Person, 'DV A/B I/P-J/H', Felonious Assault Injured Person, 'FELONIOUS ASSAULT IP' and Shots Fired Injured Person 'SHOTS FIRED IP.'
+ 
+```{r}
+#most common 911 calls descriptions by priority 
+table2 <- data %>% filter(priority==1) %>% count(calldescription) %>% arrange(desc(n))
+kable(table2, caption = "Table 2")
+```
+
+Table 3 below shows that, at the time of this analysis, the most common Priority 2 calls were for 'Unknown Problem', 'Assault and Battery Injured Person', and 'Auto Unknown Injured Impaired.'
+
+```{r}
+table3 <- data %>% filter(priority==2) %>% count(calldescription) %>% arrange(desc(n))
+kable(table3, caption = "Table 3")
+```
+
+The plot below  shows average total response time by zip code. Again, we see relatively similar average times, with many large outliers. 
+
+```{r}
+#zipcode
+ggplot(data = data, aes(x=as.factor(zip_code), y=totalresponsetime,
+                        color=as.factor(zip_code))) +
+  geom_boxplot() +
+  xlab('Zip Code') +
+  ylab('Response Time') +
+  ggtitle('Zip Code vs Response TIme')  + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "none", axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+```
+
+Finally, in our exploratory data analysis we examined hour of the day vs. response time, for which we found slightly longer response times around 3AM, 11AM, and 7PM. 
+
+```{r}
+#time of day
+plot1 <- ggplot(data = data, aes(x=as.factor(call_timeofday), y=totalresponsetime,
+                        color=as.factor(call_timeofday))) +
+  geom_boxplot() +
+  xlab('Time of Day') +
+  ylab('Response Time') +
+  ggtitle('Time of Day vs Response TIme')  + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+
+
+#hour
+plot2 <- ggplot(data = data, aes(x=as.factor(call_hour), y=totalresponsetime,
+                        color=as.factor(call_hour))) +
+  geom_boxplot() +
+  xlab('Hour Day (0=12AM, 1=1AM, etc.)') +
+  ylab('Response Time') +
+  ggtitle('Hour of Day vs Response TIme')  + 
+  theme(plot.title = element_text(hjust = 0.5), legend.position = "none")
+grid.arrange(plot1, plot2, ncol=2)
+
+```
+
+## Methodology
+
+For this analysis we will try two ensemble methods, specially: 1) random forest, and 2) boosting. In ensemble methods we are able avoid the necessity of a single model choice as well as average the prediction from several models. We will tune the parameters using cross-validation to arrive at the most accurate prediction results. 
+
+```{r, warning=FALSE}
+#list of variables to drop
+vars_remove <- names(data) %in% c("calldescription", "totalresponsetime")
+#drop unneeded variables
+data2 <- data[!vars_remove]
+
+##Training and Testing
+## Split to training and testing subset 
+total <- nrow(data2)
+set.seed(123)
+flag <- sort(sample(total*0.8,total*0.2, replace = FALSE))
+datatrain <- data2[-flag,]
+datatest <- data2[flag,]
+y1    <- datatrain$respond_atorbelowavg
+y2    <- datatest$respond_atorbelowavg
+
+#Random Forest Model
+suppressPackageStartupMessages(library(randomForest))
+##random forest with the default parameters
+rf1 <- randomForest(as.factor(datatrain$respond_atorbelowavg) ~ . , data= datatrain,  importance=TRUE)
+#Prediction on the training data set
+rf.predtrain = predict(rf1, datatest, type='class')
+rf_confusionmatrix <- table(rf.predtrain, y2)
+#testing error
+rf1.testerror <- ifelse(rf.predtrain == y2, 0, 1)
+rf_testingerrorrate <- round((sum(rf1.testerror) / length(y2) )* 100, 2)
+
+#Boosting Model 
+suppressPackageStartupMessages(library(gbm))
+##boosting model with default parameters
+datatrain$zip_code <- as.factor(datatrain$zip_code)
+datatrain$priority <- as.factor(datatrain$priority)
+datatrain$callcode <- as.factor(datatrain$callcode)
+datatrain$category <- as.factor(datatrain$category)
+datatrain$call_timeofday <- as.factor(datatrain$call_timeofday)
+datatrain$call_timestamp <- as.numeric(datatrain$call_timestamp)
+datatrain$respond_atorbelowavg <- ifelse(datatrain$respond_atorbelowavg=="Y", 1, 0)
+gbm1 <- gbm(respond_atorbelowavg ~ ., data = datatrain, distribution = "bernoulli")
+
+#Prediction 
+datatest$zip_code <- as.factor(datatest$zip_code)
+datatest$priority <- as.factor(datatest$priority)
+datatest$callcode <- as.factor(datatest$callcode)
+datatest$category <- as.factor(datatest$category)
+datatest$call_timeofday <- as.factor(datatest$call_timeofday)
+datatest$call_timestamp <- as.numeric(datatest$call_timestamp)
+#test set
+gbm.pred = predict(gbm1, newdata = datatest, type = "response")
+gbm.pred2 <- ifelse(gbm.pred >=0.5, "Y","N")
+gbm_confusionmatrix <- table(gbm.pred2, y2)
+#testing error
+gbm.pred2_error <- ifelse(gbm.pred2 == y2, 0, 1)
+gbm_testingerrorrate <- round((sum(gbm.pred2_error) / length(y2)) * 100,2)
+```
+
+## Analysis & Results
+
+The most important variables in the random forest and boosting models can be found in the Figs below. The most important variables in both the random forest and boosting models were ‘callcode’, ‘call_hour’, and ‘zip_code’.
+
+```{r}
+# print results
+varImpPlot(rf1)
+gbm_plot <-summary(gbm1)[,2]
+
+```
+
+Error rates for the training and testing sets can be found in Table 5. Neither model performed especially well, with both testing error rates roughly around 27-29% at the time of this analysis. 
+
+```{r}
+table5 <- cbind(rf_testingerrorrate, gbm_testingerrorrate)
+colnames(table5) <- c("Random Forest Testing Error Rate", "GBM Testing Error Rate")
+kable(table5, caption = "Table 5")
+```
+
+Confusion matrices for both models can be found below. Here we see that the models had different strengths and weaknesses with the randon forest model reltively good false negative rate and a relatively poor false positive rate, while the boosting model had a relatively low false negative rate and a relatively high false positive rate. 
+
+```{r}
+kable(rf_confusionmatrix, caption = "Random Forest Confusion Matrix")
+kable(gbm_confusionmatrix, caption = "GBM Confusion Matrix")
+```
+
+
+## Conclusions
+ 
+Notable, zip code was more important than percent of the population under 100% of the federal poverty line in both models, suggesting there is more nuance than just percent poverty rate that predict response time. However, given the variable importance information, we believe there is reason to believe that the percent poverty level in a given zip code significantly contribute to whether or not a resident can expect their Priority 1 or Priority 2 response call to be responded to at or below the average response rate. We suggest that city of Detroit residents can use these findings, perhaps built into an R Shiny app or similar interface, to predict the likelihood that an emergency call is responded to at or below average using their zip code, call description, and time or day of the call. In further analysis we suggest modeling the minutes of response time as a continuous outcome variable against the same predictors, as well as attempting to include additional demographic variables about zip codes such as business activity, population density, racial and ethnic composition, etc.  
+
+## Bibliography and Credits
+ 
+ * “911 Calls For Service.” Detroit's Open Data Portal, City of Detroit, data.detroitmi.gov/datasets/911-calls-for-service?geometry=-84.957%2C42.028%2C-81.886%2C42.738. 
+ * Hunter, George. “Police Commissioner Wants Answers on Response Times.” The Detroit News, The Detroit News, 5 Feb. 2019, www.detroitnews.com/story/news/local/detroit-city/2019/02/04/detroit-police-response-times-questioned/2744186002/. 
+ * “Income to Poverty Ratios in Michigan by Zip Code Tabulation Area, 2013.” D3's Open Data Portal Data Driven Detroit, 1 May 2015, portal.datadrivendetroit.org/datasets/a57ee4c6fdd24cd686b2305f2e5bf2a8_0. 
+ * LeDuff, Charlie. “Part 4: Police Response Times Are Slowest in Detroit's Poorest Neighborhoods.” Deadline Detroit, 25 Jan. 2019, www.deadlinedetroit.com/articles/21515/part_4_police_response_times_are_slowest_in_detroit_s_poorest_neighborhoods. 
